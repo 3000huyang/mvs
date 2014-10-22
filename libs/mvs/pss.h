@@ -92,10 +92,11 @@ public:
     void compute (Result* result);
 
 public: //TMP
-    mve::FloatImage::Ptr warp_view (std::size_t id, float depth);
-    mve::FloatImage::Ptr photo_consistency (mve::FloatImage const& view1,
-        mve::FloatImage const& view2);
-
+    mve::FloatImage::Ptr warp_view (std::size_t id, float const depth);
+    void photo_consistency (mve::FloatImage const& view1,
+        mve::FloatImage const& view2, mve::FloatImage* result);
+    void combine_pc_errors (std::vector<mve::FloatImage::Ptr> const& pc_errors,
+        mve::FloatImage* result);
 private:
     Options opts;
     Input input;

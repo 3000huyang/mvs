@@ -37,9 +37,11 @@ PSS::compute (Result* result)
             throw std::invalid_argument("Expecting 3-channel image");
 
     /* Blur master image a bit, because warping also causes blur. */
-    mve::image::blur_gaussian<float>(this->input.master, 1.0f);
+    //mve::image::blur_gaussian<float>(this->input.master, 1.0f);
 
     util::WallTimer timer;
+    int const width = input.master->width();
+    int const height = input.master->height();
 
     /* Iterate over all planes. */
     float const id_min = 1.0f / this->opts.max_depth;
@@ -50,42 +52,50 @@ PSS::compute (Result* result)
         float const alpha = (float)i / (float)(this->opts.num_planes - 1);
         float const idepth = alpha * id_max + (1.0f - alpha) * id_min;
 
+        /* Initialize photo consistency images. */
+        std::vector<mve::FloatImage::Ptr> pc_errors(this->input.views.size());
+        for (std::size_t j = 0; j < this->input.views.size(); ++j)
+            pc_errors[j] = mve::FloatImage::create(width, height, 1);
+
         /* Iterate over all neighboring views and warp to reference. */
         for (std::size_t j = 0; j < this->input.views.size(); ++j)
         {
             mve::FloatImage::Ptr warped = this->warp_view(j, 1.0f / idepth);
-            mve::FloatImage::Ptr pc = this->photo_consistency(*warped, *this->input.master);
-
-#if 0
-            std::string filename = get_filename("/tmp/warped", i);
-            //std::cout << "Saving warped frame " << filename << std::endl;
-            //mve::image::save_file(mve::image::float_to_byte_image(warped), filename);
-            filename = get_filename("/tmp/sad", i);
-            mve::image::save_file(mve::image::float_to_byte_image(pc), filename);
-#endif
+            this->photo_consistency(*this->input.master, *warped, &*pc_errors[j]);
+            //pc_errors[j] = mve::image::blur_gaussian<float>(pc_errors[j], 2.0f);
+            //pc_errors[j] = mve::image::blur_boxfilter<float>(pc_errors[j], 3); // Does not work?
         }
+
+        /* Combine the photo-consistency errors for all views. */
+        mve::FloatImage combined_pc(width, height, 1);
+        this->combine_pc_errors(pc_errors, &combined_pc);
+
+#if 1
+        std::string filename = get_filename("/tmp/total", i);
+        mve::image::save_file(mve::image::float_to_byte_image(combined_pc.duplicate()), filename);
+#endif
     }
 
     std::cout << "Done. Took " << timer.get_elapsed() << " ms." << std::endl;
 }
 
 mve::FloatImage::Ptr
-PSS::warp_view (std::size_t id, float depth)
+PSS::warp_view (std::size_t id, float const depth)
 {
     math::Matrix3f const& rmat = this->input.views[id].rmat;
     math::Vec3f const& rvec = this->input.views[id].rvec;
 
-    int iw = this->input.master->width();
-    int ih = this->input.master->height();
-    int ic = this->input.master->channels();
-    float width = static_cast<float>(iw);
-    float height = static_cast<float>(ih);
+    int const iw = this->input.master->width();
+    int const ih = this->input.master->height();
+    int const ic = this->input.master->channels();
+    float const width = static_cast<float>(iw);
+    float const height = static_cast<float>(ih);
 
-    /* Reproject the corners of the master view to the neighbor. */
-    math::Vec3f const cm0(-0.5f, -0.5f, 1.0f);
-    math::Vec3f const cm1(-0.5f, height - 0.5f, 1.0f);
+    /* Reproject the centers of the corner pixels to the neighbor view. */
+    math::Vec3f const cm0(0.5f, 0.5f, 1.0f);
+    math::Vec3f const cm1(0.5f, height - 0.5f, 1.0f);
     math::Vec3f const cm2(width - 0.5f, height - 0.5f, 1.0f);
-    math::Vec3f const cm3(width - 0.5f, -0.5f, 1.0f);
+    math::Vec3f const cm3(width - 0.5f, 0.5f, 1.0f);
     math::Vec3f const ci0 = rmat * cm0 * depth + rvec;
     math::Vec3f const ci1 = rmat * cm1 * depth + rvec;
     math::Vec3f const ci2 = rmat * cm2 * depth + rvec;
@@ -97,7 +107,7 @@ PSS::warp_view (std::size_t id, float depth)
     for (int y = 0; y < ih; ++y)
     {
         float const y_alpha = (float)y / (float)(ih - 1);
-        for (int x = 0; x < iw; ++x, warped_ptr += 3)
+        for (int x = 0; x < iw; ++x, warped_ptr += ic)
         {
             float const x_alpha = (float)x / (float)(iw - 1);
 
@@ -107,43 +117,97 @@ PSS::warp_view (std::size_t id, float depth)
             float const w2 = x_alpha * y_alpha;
             float const w3 = x_alpha * (1.0f - y_alpha);
             math::Vec3f p = w0 * ci0 + w1 * ci1 + w2 * ci2 + w3 * ci3;
-            image->linear_at(p[0] / p[2], p[1] / p[2], warped_ptr);
 
-            // TODO Check if outside image
+            float const fx = p[0] / p[2];
+            float const fy = p[1] / p[2];
+            if (fx < 0.0f || fx > width || fy < 0.0f || fy > height)
+            {
+                std::fill(warped_ptr, warped_ptr + ic,
+                    std::numeric_limits<float>::quiet_NaN());
+//                warped_ptr[0] = 1.0f;
+//                warped_ptr[1] = 0.0f;
+//                warped_ptr[2] = 1.0f;
+                continue;
+            }
+
+            image->linear_at(fx - 0.5f, fy - 0.5f, warped_ptr);
         }
     }
 
     return warped;
 }
 
-mve::FloatImage::Ptr
+void
 PSS::photo_consistency (mve::FloatImage const& view1,
-    mve::FloatImage const& view2)
+    mve::FloatImage const& view2, mve::FloatImage* result)
 {
     int const width = view1.width();
     int const height = view2.height();
-
-    mve::FloatImage::Ptr pc = mve::FloatImage::create(width, height, 1);
     for (int i = 0, j = 0, y = 0; y < height; ++y)
         for (int x = 0; x < width; ++x, ++i, j += 3)
         {
-            pc->at(i) = 0;
-            pc->at(i) += std::abs(view1.at(j + 0) - view2.at(j + 0));
-            pc->at(i) += std::abs(view1.at(j + 1) - view2.at(j + 1));
-            pc->at(i) += std::abs(view1.at(j + 2) - view2.at(j + 2));
-            //pc->at(i) /= 3.0f;
+            result->at(i) = 0.0f;
+            result->at(i) += std::abs(view1.at(j + 0) - view2.at(j + 0));
+            result->at(i) += std::abs(view1.at(j + 1) - view2.at(j + 1));
+            result->at(i) += std::abs(view1.at(j + 2) - view2.at(j + 2));
+            result->at(i) /= 3.0f;
         }
-
-    //pc = mve::image::blur_gaussian<float>(pc, 3.0f);
-    pc = mve::image::blur_boxfilter<float>(pc, 3);
-
-    return pc;
 }
 
+void
+PSS::combine_pc_errors (std::vector<mve::FloatImage::Ptr> const& pc_errors,
+        mve::FloatImage* result)
+{
+    int const width = result->width();
+    int const height = result->height();
+    for (int i = 0, y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x, ++i)
+        {
+            float total_error = 0.0f;
+            float norm = 0.0f;
 
+#if 1 // Average
+            for (std::size_t j = 0; j < pc_errors.size(); ++j)
+            {
+                float const pc = pc_errors[j]->at(i);
+                if (std::isnan(pc))
+                    continue;
+                total_error += pc;
+                norm += 1.0f;
+            }
+#endif
+
+#if 0 // Occlusion robust average
+            std::vector<float> values;
+            for (std::size_t j = 0; j < pc_errors.size(); ++j)
+            {
+                float const pc = pc_errors[j]->at(i);
+                if (std::isnan(pc))
+                    continue;
+                values.push_back(pc);
+                total_error += pc;
+                norm += 1;
+            }
+
+            if (values.size() > 4)
+            {
+                total_error = 0.0f;
+                norm = 0.0f;
+                std::sort(values.begin(), values.end());
+                for (std::size_t j = 0; j < 2 * values.size() / 3; ++j)
+                {
+                    total_error += values[j];
+                    norm += 1.0f;
+                }
+            }
+#endif
+
+
+            result->at(i) = total_error / norm * 5.0f;
+        }
+}
 
 MVS_NAMESPACE_END
-
 
 
 #if 0
