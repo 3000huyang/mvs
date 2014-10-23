@@ -48,7 +48,8 @@ PSS::compute (Result* result)
     float const id_max = 1.0f / this->opts.min_depth;
     for (int i = 0; i < this->opts.num_planes; ++i)
     {
-        std::cout << "Processing plane " << i << "..." << std::endl;
+        std::cout << "\rProcessing plane " << i << " of "
+            << this->opts.num_planes << "..." << std::flush;
         float const alpha = (float)i / (float)(this->opts.num_planes - 1);
         float const idepth = alpha * id_max + (1.0f - alpha) * id_min;
 

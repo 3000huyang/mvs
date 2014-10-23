@@ -18,9 +18,9 @@ MVS_NAMESPACE_BEGIN
 
 /**
  * A global view selection algorithm. It selects for a given master view
- * a desired number of neighboring views using a greedy selection of
- * suitable views. A suitable view is determined based on already selected
- * views and visibility of features in the master views.
+ * a desired number of suitable neighboring views. A suitable view
+ * is greedily determined based on already selected views and visibility
+ * of features in the master view.
  */
 class ViewSelection
 {

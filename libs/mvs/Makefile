@@ -1,6 +1,6 @@
 MVE_ROOT := ../../../mve
 PSS_ROOT := ../..
-TARGET := libpss.a
+TARGET := libmvs.a
 include ${MVE_ROOT}/Makefile.inc
 
 # Position independent code (-fPIC) is required for the UMVE plugin system.
