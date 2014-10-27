@@ -9,7 +9,7 @@ LDLIBS += -lpng -ltiff -ljpeg ${OPENMP}
 vpath libmvs.a ${PSS_ROOT}/libs/mvs/
 SOURCES := $(wildcard [^_]*.cc)
 ${TARGET}: ${SOURCES:.cc=.o} libmvs.a libmve.a libmve_util.a
-	$(LINK.o) $^ $(LDLIBS) -o $@
+	$(LINK.o) $^ $(LDLIBS) -o $@ ${OPENMP}
 
 clean:
 	${RM} ${TARGET} *.o Makefile.dep

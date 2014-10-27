@@ -5,6 +5,7 @@
 #include "util/arguments.h"
 #include "mve/scene.h"
 #include "mve/image.h"
+#include "mve/depthmap.h"
 #include "mve/image_tools.h"
 #include "mvs/pss.h"
 #include "mvs/view_selection.h"
@@ -115,7 +116,7 @@ reconstruct_view (AppSettings const& conf,
         mvs::PSS::Options pss_opts;
         find_depth_range(scene, master_id,
             &pss_opts.min_depth, &pss_opts.max_depth);
-        pss_opts.num_planes = 100;
+        pss_opts.num_planes = 200;
 
         std::cout << "Depth range: " << pss_opts.min_depth
             << " to " << pss_opts.max_depth << std::endl;
@@ -123,6 +124,13 @@ reconstruct_view (AppSettings const& conf,
         /* Run PSS. */
         mvs::PSS pss(pss_opts, pss_input);
         pss.compute(&pss_result);
+
+        /* Convert depth map conventions. */
+        math::Matrix3f master_inv_proj;
+        master_cam.fill_inverse_calibration(master_inv_proj.begin(),
+            pss_result.depth->width(), pss_result.depth->height());
+        mve::image::depthmap_convert_conventions<float>(pss_result.depth,
+            master_inv_proj, true);
     }
     catch (std::exception& e)
     {
@@ -137,9 +145,13 @@ reconstruct_view (AppSettings const& conf,
         return 1;
     }
 
+
     /* Save result back. */
     mve::View::Ptr view = scene->get_view_by_id(master_id);
-    view->set_image(conf.target_depth, pss_result.depth);
+    if (!conf.target_depth.empty())
+        view->set_image(conf.target_depth, pss_result.depth);
+    if (!conf.target_conf.empty())
+        view->set_image(conf.target_conf, pss_result.conf);
     view->save_mve_file();
 
     return 0;
@@ -195,7 +207,7 @@ main (int argc, char** argv)
     conf.source_image = "undistorted";
     conf.master_id = -1;
     conf.scale = 2;
-    conf.num_neighbors = 5;
+    conf.num_neighbors = 15;
 
     /* Parse arguments. */
     for (util::ArgResult const* arg = args.next_option();
@@ -219,6 +231,8 @@ main (int argc, char** argv)
 
     if (conf.target_depth.empty())
         conf.target_depth = "depth-L" + util::string::get(conf.scale);
+    if (conf.target_conf.empty())
+        conf.target_conf = "conf-L" + util::string::get(conf.scale);
     if (conf.scale > 0 && conf.target_image.empty())
         conf.target_image = "undist-L" + util::string::get(conf.scale);
 

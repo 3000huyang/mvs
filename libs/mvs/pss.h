@@ -97,6 +97,9 @@ public: //TMP
         mve::FloatImage const& view2, mve::FloatImage* result);
     void combine_pc_errors (std::vector<mve::FloatImage::Ptr> const& pc_errors,
         mve::FloatImage* result);
+    void compute_result (std::vector<mve::FloatImage> const& cost_volume,
+        Result* result);
+
 private:
     Options opts;
     Input input;

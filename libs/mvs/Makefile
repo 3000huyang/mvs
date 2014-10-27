@@ -4,7 +4,7 @@ TARGET := libmvs.a
 include ${MVE_ROOT}/Makefile.inc
 
 # Position independent code (-fPIC) is required for the UMVE plugin system.
-CXXFLAGS += -fPIC -I${MVE_ROOT}/libs -I${PSS_ROOT}/libs
+CXXFLAGS += -fPIC -I${MVE_ROOT}/libs -I${PSS_ROOT}/libs ${OPENMP}
 LDLIBS += -lpng -ltiff -ljpeg
 
 SOURCES := $(wildcard [^_]*.cc)

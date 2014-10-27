@@ -43,24 +43,25 @@ PSS::compute (Result* result)
     int const width = input.master->width();
     int const height = input.master->height();
 
-    /* Iterate over all planes. */
+    /* Iterate over all planes and compute cost volume. */
     float const id_min = 1.0f / this->opts.max_depth;
     float const id_max = 1.0f / this->opts.min_depth;
+    std::vector<mve::FloatImage> cost_volume(this->opts.num_planes);
+
+#pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < this->opts.num_planes; ++i)
     {
+#pragma omp critical
         std::cout << "\rProcessing plane " << i << " of "
             << this->opts.num_planes << "..." << std::flush;
         float const alpha = (float)i / (float)(this->opts.num_planes - 1);
         float const idepth = alpha * id_max + (1.0f - alpha) * id_min;
 
-        /* Initialize photo consistency images. */
+        /* Iterate over all neighboring views and warp to reference. */
         std::vector<mve::FloatImage::Ptr> pc_errors(this->input.views.size());
         for (std::size_t j = 0; j < this->input.views.size(); ++j)
-            pc_errors[j] = mve::FloatImage::create(width, height, 1);
-
-        /* Iterate over all neighboring views and warp to reference. */
-        for (std::size_t j = 0; j < this->input.views.size(); ++j)
         {
+            pc_errors[j] = mve::FloatImage::create(width, height, 1);
             mve::FloatImage::Ptr warped = this->warp_view(j, 1.0f / idepth);
             this->photo_consistency(*this->input.master, *warped, &*pc_errors[j]);
             //pc_errors[j] = mve::image::blur_gaussian<float>(pc_errors[j], 2.0f);
@@ -68,14 +69,19 @@ PSS::compute (Result* result)
         }
 
         /* Combine the photo-consistency errors for all views. */
-        mve::FloatImage combined_pc(width, height, 1);
-        this->combine_pc_errors(pc_errors, &combined_pc);
+        cost_volume[i].allocate(width, height, 1);
+        this->combine_pc_errors(pc_errors, &cost_volume[i]);
 
-#if 1
+#if 0
         std::string filename = get_filename("/tmp/total", i);
-        mve::image::save_file(mve::image::float_to_byte_image(combined_pc.duplicate()), filename);
+        mve::image::save_file(mve::image::float_to_byte_image(cost_volume[i].duplicate()), filename);
 #endif
     }
+    std::cout << std::endl;
+
+    /* Compute result. */
+    std::cout << "Computing output depth map..." << std::endl;
+    this->compute_result(cost_volume, result);
 
     std::cout << "Done. Took " << timer.get_elapsed() << " ms." << std::endl;
 }
@@ -203,87 +209,49 @@ PSS::combine_pc_errors (std::vector<mve::FloatImage::Ptr> const& pc_errors,
             }
 #endif
 
+            result->at(i) = total_error / norm;
+        }
+}
 
-            result->at(i) = total_error / norm * 5.0f;
+void
+PSS::compute_result (std::vector<mve::FloatImage> const& cost_volume,
+    PSS::Result* result)
+{
+    if (cost_volume.empty())
+        throw std::invalid_argument("Empty cost volume");
+
+    float const id_min = 1.0f / this->opts.max_depth;
+    float const id_max = 1.0f / this->opts.min_depth;
+    int const width = cost_volume[0].width();
+    int const height = cost_volume[0].height();
+
+    result->depth = mve::FloatImage::create(width, height, 1);
+    result->conf = mve::FloatImage::create(width, height, 1);
+    result->depth->fill(0.0f);
+    for (int y = 0, i = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x, ++i)
+        {
+            float min_error = 1.0f;
+            int min_index = -1;
+            for (int p = 0; p < this->opts.num_planes; ++p)
+            {
+                mve::FloatImage const& plane = cost_volume[p];
+                float const value = plane.at(i);
+                if (value < min_error)
+                {
+                    min_error = value;
+                    min_index = p;
+                }
+            }
+
+            float const alpha = (float)min_index / (float)(this->opts.num_planes - 1);
+            float const idepth = alpha * id_max + (1.0f - alpha) * id_min;
+            float const depth = 1.0f / idepth;
+
+            result->conf->at(i) = min_error;
+            if (min_error < 0.5f)
+                result->depth->at(i) = depth;
         }
 }
 
 MVS_NAMESPACE_END
-
-
-#if 0
-
-void
-PSS::reconstruct (Options const& opts, Result* result)
-{
-    std::cout << "Starting reconstruction for view " << opts.view_id
-        << " at scale " << opts.scale
-        << " with " << opts.num_hypothesis << " hypothesis." << std::endl;
-
-    /* Retrieve view and image. */
-    mve::View::Ptr view = this->views->get_view(opts.view_id);
-    if (view == NULL)
-        throw util::Exception("Invalid master view ID",
-            util::string::get(opts.view_id));
-
-    /* Find min/max depth. */
-    float min_depth, max_depth;
-    this->find_depth_range(view, &min_depth, &max_depth);
-    std::cout << "Computed depth range: " << min_depth
-        << " to " << max_depth << std::endl;
-
-    /* View selection. */
-    std::vector<int> selected_views;
-    {
-        pss::ViewSelection::Options vs_opts;
-        vs_opts.num_views = 20;
-        pss::ViewSelection vs(vs_opts, this->views);
-        vs.select(opts.view_id, &selected_views);
-        if (selected_views.empty())
-            throw util::Exception("View selection failed");
-    }
-
-    std::cout << "View selection:";
-    for (std::size_t i = 0; i < selected_views.size(); ++i)
-        std::cout << " " << selected_views[i];
-    std::cout << std::endl;
-}
-
-void
-PSS::find_depth_range (mve::View::Ptr view, float* min_depth, float* max_depth)
-{
-    math::Matrix4f wtc;
-    view->get_camera().fill_world_to_cam(wtc.begin());
-    math::Matrix3f proj;
-    view->get_camera().fill_calibration(proj.begin(), 1.0f,  1.0f);
-
-    mve::Bundle::Features const& features = this->bundle->get_features();
-    std::vector<float> depths;
-    depths.reserve(features.size());
-    for (std::size_t i = 0; i < features.size(); ++i)
-    {
-        mve::Bundle::Feature3D const& f3d = features[i];
-        math::Vec3f fpos(f3d.pos);
-        fpos = wtc.mult(fpos, 1.0f);
-        float const depth = fpos[2];
-        if (depth <= 0.0f)
-            continue;
-
-        fpos = proj.mult(fpos);
-        fpos /= fpos[2];
-        if (fpos[0] < 0.0f || fpos[0] > 1.0f
-            || fpos[1] < 0.0f || fpos[1] > 1.0f)
-            continue;
-        depths.push_back(depth);
-    }
-
-    std::sort(depths.begin(), depths.end());
-    *min_depth = depths[0];
-    *max_depth = depths[19 * depths.size() / 20];
-    *min_depth = std::max(*min_depth, 1e-4f);
-    *max_depth = std::min(*max_depth, 1e4f);
-}
-
-#endif
-
-
