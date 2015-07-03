@@ -8,7 +8,7 @@
 #include "mve/image_io.h"
 #include "mve/image_tools.h"
 #include "mvs/view_selection.h"
-#include "mvs/pss.h"
+#include "mvs/plane_sweeping.h"
 
 MVS_NAMESPACE_BEGIN
 
@@ -51,11 +51,12 @@ PSS::compute (Result* result)
 #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < this->opts.num_planes; ++i)
     {
+        float const alpha = (float)i / (float)(this->opts.num_planes - 1);
+        float const idepth = alpha * id_max + (1.0f - alpha) * id_min;
+
 #pragma omp critical
         std::cout << "\rProcessing plane " << i << " of "
             << this->opts.num_planes << "..." << std::flush;
-        float const alpha = (float)i / (float)(this->opts.num_planes - 1);
-        float const idepth = alpha * id_max + (1.0f - alpha) * id_min;
 
         /* Iterate over all neighboring views and warp to reference. */
         std::vector<mve::FloatImage::Ptr> pc_errors(this->input.views.size());
@@ -64,6 +65,7 @@ PSS::compute (Result* result)
             pc_errors[j] = mve::FloatImage::create(width, height, 1);
             mve::FloatImage::Ptr warped = this->warp_view(j, 1.0f / idepth);
             this->photo_consistency(*this->input.master, *warped, &*pc_errors[j]);
+            //mve::image::save_file(mve::image::float_to_byte_image(warped), get_filename("/tmp/warped", i));
             //pc_errors[j] = mve::image::blur_gaussian<float>(pc_errors[j], 2.0f);
             //pc_errors[j] = mve::image::blur_boxfilter<float>(pc_errors[j], 3); // Does not work?
         }
@@ -131,9 +133,9 @@ PSS::warp_view (std::size_t id, float const depth)
             {
                 std::fill(warped_ptr, warped_ptr + ic,
                     std::numeric_limits<float>::quiet_NaN());
-//                warped_ptr[0] = 1.0f;
-//                warped_ptr[1] = 0.0f;
-//                warped_ptr[2] = 1.0f;
+                //warped_ptr[0] = 1.0f;  // TMP
+                //warped_ptr[1] = 0.0f;  // TMP
+                //warped_ptr[2] = 1.0f;  // TMP
                 continue;
             }
 
@@ -149,16 +151,84 @@ PSS::photo_consistency (mve::FloatImage const& view1,
     mve::FloatImage const& view2, mve::FloatImage* result)
 {
     int const width = view1.width();
-    int const height = view2.height();
+    int const height = view1.height();
+
+    result->fill(std::numeric_limits<float>::quiet_NaN());
+
+#if 0
     for (int i = 0, j = 0, y = 0; y < height; ++y)
         for (int x = 0; x < width; ++x, ++i, j += 3)
         {
             result->at(i) = 0.0f;
-            result->at(i) += std::abs(view1.at(j + 0) - view2.at(j + 0));
-            result->at(i) += std::abs(view1.at(j + 1) - view2.at(j + 1));
-            result->at(i) += std::abs(view1.at(j + 2) - view2.at(j + 2));
+            //result->at(i) += std::abs(view1.at(j + 0) - view2.at(j + 0));
+            //result->at(i) += std::abs(view1.at(j + 1) - view2.at(j + 1));
+            //result->at(i) += std::abs(view1.at(j + 2) - view2.at(j + 2));
+            result->at(i) += MATH_POW2(view1.at(j + 0) - view2.at(j + 0));
+            result->at(i) += MATH_POW2(view1.at(j + 1) - view2.at(j + 1));
+            result->at(i) += MATH_POW2(view1.at(j + 2) - view2.at(j + 2));
             result->at(i) /= 3.0f;
         }
+#endif
+
+
+#if 1 // NCC 7x7
+    for (int i = 0, y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x, ++i)
+        {
+            if (x < 3 || x >= width - 3 || y < 3 || y >= height - 3)
+                continue;
+
+            std::vector<float> p1(49 * 3, 0.0f);
+            std::vector<float> p2(49 * 3, 0.0f);
+            for (int j = 0, yi = -3; yi <= 3; yi++)
+                for (int xi = -3; xi <= 3; xi++)
+                    for (int c = 0; c < 3; ++c, ++j)
+                    {
+                        p1[j] = view1.at(x + xi, y + yi, c);
+                        p2[j] = view2.at(x + xi, y + yi, c);
+                    }
+
+            std::vector<float> m1(3, 0.0f);
+            std::vector<float> m2(3, 0.0f);
+            for (std::size_t j = 0; j < 49 * 3; ++j)
+            {
+                m1[j % 3] += p1[j] / 49.0f;
+                m2[j % 3] += p2[j] / 49.0f;
+            }
+            for (std::size_t j = 0; j < 49 * 3; ++j)
+            {
+                p1[j] -= m1[j % 3];
+                p2[j] -= m2[j % 3];
+            }
+            float norm1 = std::inner_product(p1.begin(), p1.end(), p1.begin(), 0.0f);
+            float norm2 = std::inner_product(p2.begin(), p2.end(), p2.begin(), 0.0f);
+            norm1 = std::sqrt(norm1);
+            norm2 = std::sqrt(norm2);
+            for (std::size_t j = 0; j < 49 * 3; ++j)
+            {
+                p1[j] /= norm1;
+                p2[j] /= norm2;
+            }
+            float dot = std::inner_product(p1.begin(), p1.end(), p2.begin(), 0.0f);
+            result->at(i) = 1.0f - dot;
+        }
+#endif
+
+#if 0 // SSD 7x7
+    for (int i = 0, y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x, ++i)
+        {
+            if (x < 3 || x >= width - 3 || y < 3 || y >= height - 3)
+                continue;
+
+            result->at(i) = 0.0f;
+            for (int xi = -3; xi <= 3; xi++)
+                for (int yi = -3; yi <= 3; yi++)
+                    for (int c = 0; c < 3; ++c)
+                        result->at(i) += MATH_POW2(view1.at(x + xi, y + yi, c) - view2.at(x + xi, y + yi, c));
+            result->at(i) /= 49.0f * 3.0f;
+        }
+#endif
 }
 
 void
@@ -209,7 +279,7 @@ PSS::combine_pc_errors (std::vector<mve::FloatImage::Ptr> const& pc_errors,
             }
 #endif
 
-            result->at(i) = total_error / norm;
+            result->at(i) = norm > 0.0f ? total_error / norm : 1.0f;
         }
 }
 
@@ -249,7 +319,7 @@ PSS::compute_result (std::vector<mve::FloatImage> const& cost_volume,
             float const depth = 1.0f / idepth;
 
             result->conf->at(i) = min_error;
-            if (min_error < 0.5f)
+            if (min_error < 0.5)
                 result->depth->at(i) = depth;
         }
 }

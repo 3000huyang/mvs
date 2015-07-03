@@ -7,7 +7,7 @@
 #include "mve/image.h"
 #include "mve/depthmap.h"
 #include "mve/image_tools.h"
-#include "mvs/pss.h"
+#include "mvs/plane_sweeping.h"
 #include "mvs/view_selection.h"
 
 struct AppSettings
@@ -30,7 +30,7 @@ find_depth_range (mve::Scene::Ptr scene, int master_id,
     mve::CameraInfo const& cam = scene->get_view_by_id(master_id)->get_camera();
     math::Matrix3f cam_rot;
     math::Vec3f cam_trans;
-    cam.fill_world_to_cam(cam_rot.begin());
+    cam.fill_world_to_cam_rot(cam_rot.begin());
     cam.fill_camera_translation(cam_trans.begin());
 
     std::vector<float> depths;
@@ -49,12 +49,22 @@ find_depth_range (mve::Scene::Ptr scene, int master_id,
     *max_depth = depths[9 * depths.size() / 10];
 }
 
+mve::ByteImage::Ptr
+rescale_image (AppSettings const& conf, mve::ByteImage::Ptr image)
+{
+    mve::ByteImage::Ptr ret = image;
+    for (int scale = conf.scale; scale > 0; --scale)
+        ret = mve::image::rescale_half_size<uint8_t>(ret);
+    return ret;
+}
+
 int
 reconstruct_view (AppSettings const& conf,
     mve::Scene::Ptr scene, std::size_t master_id)
 {
     /* Run view selection. */
     std::vector<int> selected_views;
+#if 1
     {
         mvs::ViewSelection::Options vs_opts;
         vs_opts.master_id = master_id;
@@ -67,13 +77,32 @@ reconstruct_view (AppSettings const& conf,
             std::cout << " " << selected_views[i];
         std::cout << std::endl;
     }
+#else
+    selected_views.push_back(0);
+    selected_views.push_back(2);
+    selected_views.push_back(3);
+    selected_views.push_back(4);
+#endif
 
     /* Run PSS. */
     mvs::PSS::Result pss_result;
     try
     {
-        std::cout << "Loading view ID "
-            << master_id << " (master)..." << std::endl;
+        /* Prepare PSS Options. */
+        mvs::PSS::Options pss_opts;
+#if 1
+        find_depth_range(scene, master_id,
+            &pss_opts.min_depth, &pss_opts.max_depth);
+        pss_opts.num_planes = 500;
+#else
+        // TMP
+        pss_opts.num_planes = 1000;
+        pss_opts.min_depth = 0.25f;
+        pss_opts.max_depth = 5.0f;
+#endif
+
+        std::cout << "Depth range: " << pss_opts.min_depth
+            << " to " << pss_opts.max_depth << std::endl;
 
         /* Prepare PSS input. */
         mve::View::Ptr master_view = scene->get_view_by_id(master_id);
@@ -83,8 +112,14 @@ reconstruct_view (AppSettings const& conf,
         mve::ByteImage::Ptr master_image = master_view->get_byte_image(conf.source_image);
         if (master_image == NULL)
             throw std::invalid_argument("Invalid master image");
+        master_image = rescale_image(conf, master_image);
         int const master_width = master_image->width();
         int const master_height = master_image->height();
+
+        std::cout << "Loaded view ID "
+            << master_id << " (master, "
+            << master_width << "x" << master_height << ")..."
+            << std::endl;
 
         mve::CameraInfo master_cam = master_view->get_camera();
         if (master_cam.flen == 0.0f)
@@ -94,14 +129,17 @@ reconstruct_view (AppSettings const& conf,
         pss_input.master = mve::image::byte_to_float_image(master_image);
         for (std::size_t i = 0; i < selected_views.size(); ++i)
         {
-            std::cout << "Loading view ID "
-                << selected_views[i] << " (neighbor)..." << std::endl;
-
             mve::View::Ptr neighbor_view = scene->get_view_by_id(selected_views[i]);
             mve::ByteImage::Ptr neighbor_image = neighbor_view->get_byte_image(conf.source_image);
+            neighbor_image = rescale_image(conf, neighbor_image);
             mve::CameraInfo neighbor_cam = neighbor_view->get_camera();
             int const neighbor_width = neighbor_image->width();
             int const neighbor_height = neighbor_image->height();
+
+            std::cout << "Loaded view ID "
+                << selected_views[i] << " (neighbor, "
+                << neighbor_width << "x" << neighbor_height << ")..."
+                << std::endl;
 
             mvs::PSS::NeighborView pss_neighbor;
             pss_neighbor.image = mve::image::byte_to_float_image(neighbor_image);
@@ -111,15 +149,6 @@ reconstruct_view (AppSettings const& conf,
 
             pss_input.views.push_back(pss_neighbor);
         }
-
-        /* Prepare PSS Options. */
-        mvs::PSS::Options pss_opts;
-        find_depth_range(scene, master_id,
-            &pss_opts.min_depth, &pss_opts.max_depth);
-        pss_opts.num_planes = 200;
-
-        std::cout << "Depth range: " << pss_opts.min_depth
-            << " to " << pss_opts.max_depth << std::endl;
 
         /* Run PSS. */
         mvs::PSS pss(pss_opts, pss_input);
@@ -131,6 +160,16 @@ reconstruct_view (AppSettings const& conf,
             pss_result.depth->width(), pss_result.depth->height());
         mve::image::depthmap_convert_conventions<float>(pss_result.depth,
             master_inv_proj, true);
+
+        /* Save result back. */
+        mve::View::Ptr view = scene->get_view_by_id(master_id);
+        if (!conf.target_image.empty())
+            view->set_image(conf.target_image, master_image);
+        if (!conf.target_depth.empty())
+            view->set_image(conf.target_depth, pss_result.depth);
+        if (!conf.target_conf.empty())
+            view->set_image(conf.target_conf, pss_result.conf);
+        view->save_mve_file();
     }
     catch (std::exception& e)
     {
@@ -144,15 +183,6 @@ reconstruct_view (AppSettings const& conf,
         std::cerr << "No result depth map. Exiting." << std::endl;
         return 1;
     }
-
-
-    /* Save result back. */
-    mve::View::Ptr view = scene->get_view_by_id(master_id);
-    if (!conf.target_depth.empty())
-        view->set_image(conf.target_depth, pss_result.depth);
-    if (!conf.target_conf.empty())
-        view->set_image(conf.target_conf, pss_result.conf);
-    view->save_mve_file();
 
     return 0;
 }
@@ -197,7 +227,7 @@ main (int argc, char** argv)
     args.add_option('m', "master-id", true, "Master view ID to reconstruct");
     args.add_option('s', "scale", true, "Reconstruction scale (0 is original size) [2]");
     args.add_option('\0', "target-depth", true, "Target depthmap embedding [auto]");
-    args.add_option('\0', "target-conf", true, "Target confidence map embedding []");
+    args.add_option('\0', "target-conf", true, "Target confidence map embedding [auto]");
     args.add_option('\0', "target-image", true, "Target scaled image embedding [auto]");
     args.parse(argc, argv);
 

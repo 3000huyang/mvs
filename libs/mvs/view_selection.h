@@ -32,6 +32,7 @@ public:
         int master_id;
         int num_views;
         float min_parallax;
+        std::string image_name;
     };
 
 public:
@@ -44,6 +45,8 @@ private:
         bool valid;
         mve::CameraInfo cam;
         math::Vec3f campos;
+        int width;
+        int height;
     };
     typedef std::vector<CachedView> ViewCache;
 

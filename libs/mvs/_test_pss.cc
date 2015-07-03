@@ -4,7 +4,7 @@
 #include "mve/image.h"
 #include "mve/image_tools.h"
 #include "mve/image_io.h"
-#include "mvs/pss.h"
+#include "mvs/plane_sweeping.h"
 
 int main (int argc, char** argv)
 {

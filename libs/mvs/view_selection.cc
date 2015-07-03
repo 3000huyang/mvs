@@ -10,6 +10,8 @@ ViewSelection::select (Options const& options, std::vector<int>* result)
     mve::Scene::ViewList const& views = this->scene->get_views();
     if (options.master_id < 0 || options.master_id >= (int)views.size())
         throw std::invalid_argument("Invalid master view ID");
+    if (options.image_name.empty())
+        throw std::invalid_argument("Image name not specified");
 
     /* Cache suitable views. */
     ViewCache cache(views.size());
@@ -20,11 +22,16 @@ ViewSelection::select (Options const& options, std::vector<int>* result)
             continue;
         if (views[i]->get_camera().flen == 0.0f)
             continue;
-        // TODO Check if embedding exists.
+        mve::View::ImageProxy const* proxy
+            = views[i]->get_image_proxy(options.image_name);
+        if (proxy == NULL)
+            continue;
 
         cache[i].valid = true;
         cache[i].cam = views[i]->get_camera();
         cache[i].cam.fill_camera_pos(cache[i].campos.begin());
+        cache[i].width = proxy->width;
+        cache[i].height = proxy->height;
     }
 
     if (!cache[options.master_id].valid)
@@ -51,11 +58,13 @@ ViewSelection::select (Options const& options, std::vector<int>* result)
 
         for (std::size_t i = 0; i < cache.size(); ++i)
         {
+            /* Skip master view, invalid and already selected views. */
             if ((int)i == options.master_id || !cache[i].valid)
                 continue;
 
-            float score = this->compute_score(i, options, master_features,
-                cache, *result);
+            /* Compute score based on already selected views. */
+            float score = this->compute_score
+                (i, options, master_features, cache, *result);
             if (score > best_score)
             {
                 best_score = score;
@@ -79,9 +88,21 @@ ViewSelection::compute_score (std::size_t view_id,
     ViewCache const& cache,
     std::vector<int> const& result)
 {
-    float total_score = 0.0f;
+    /* Compute focal length and cache WTC matrix for master and neighbor. */
+    CachedView const& master = cache[options.master_id];
+    float const master_flen = std::max(master.width, master.height)
+        * master.cam.flen;
+    math::Matrix4f master_wtc;
+    master.cam.fill_world_to_cam(master_wtc.begin());
 
-    /* Iterate over all features. */
+    CachedView const& neighbor = cache[view_id];
+    float const neighbor_flen = std::max(neighbor.width, neighbor.height)
+        * neighbor.cam.flen;
+    math::Matrix4f neighbor_wtc;
+    neighbor.cam.fill_world_to_cam(neighbor_wtc.begin());
+
+    /* Iterate over all features and compute total score. */
+    float total_score = 0.0f;
     for (std::size_t i = 0; i < features.size(); ++i)
     {
         if (!features[i].contains_view_id(view_id))
@@ -97,7 +118,15 @@ ViewSelection::compute_score (std::size_t view_id,
             score *= std::sqrt(parallax / options.min_parallax);
 
         /* Check resolution compared to master view. */
-        // TODO
+        math::Vec3f const master_fpos = master_wtc.mult(fpos, 1.0f);
+        math::Vec3f const neighbor_fpos = neighbor_wtc.mult(fpos, 1.0f);
+        float const master_fp = master_fpos[2] / master_flen;
+        float const neighbor_fp = neighbor_fpos[2] / neighbor_flen;
+        float const fp_ratio = master_fp / neighbor_fp;
+        if (fp_ratio < 1.0f)
+            score *= fp_ratio;
+        else if (fp_ratio > 2.0f)
+            score *= 2.0f / fp_ratio;
 
         /* Check feature parallax with already selected views. */
         for (std::size_t j = 0; j < result.size(); ++j)

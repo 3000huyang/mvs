@@ -1,4 +1,6 @@
 /*
+ * Plane Sweeping Stereo implementation. This is WORK IN PROGRESS.
+ *
  * Notes for paper:
  *   Least Commitment, Viewpoint-based, Multi-view Stereo
  *   Xiaoyan Hu, Philippos Mordohai
